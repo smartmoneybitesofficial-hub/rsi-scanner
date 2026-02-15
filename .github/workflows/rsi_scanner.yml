@@ -2,7 +2,7 @@ name: RSI Scanner
 
 on:
   schedule:
-    - cron: '0 */6 * * *'   # every 6 hours
+    - cron: '0 14,23 * * 1-5'   # every 9AM & 6PM US time on weekdays no weekends runs
   workflow_dispatch:
 
 permissions:

@@ -22,7 +22,7 @@ RSI_OVERBOUGHT = 80
 RSI_EXTREME_OVERBOUGHT = 90
 
 # Optional: Gmail for alerts (use app password)
-SEND_EMAIL = False
+SEND_EMAIL = True
 EMAIL_FROM = os.environ.get("EMAIL_FROM", "")
 EMAIL_TO = os.environ.get("EMAIL_TO", "")
 EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD", "")
