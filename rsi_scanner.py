@@ -5,6 +5,8 @@ from colorama import Fore, Style, init
 import smtplib
 from email.message import EmailMessage
 import os
+from datetime import datetime
+
 
 # Initialize colorama
 init(autoreset=True)
@@ -72,23 +74,117 @@ def compute_rsi_wilder(series, period=14):
 # ==========================
 # Optional: Send Email
 # ==========================
+# ==========================
+# Professional Email Version
+# ==========================
+
 def send_email(df):
     if df.empty or not SEND_EMAIL:
         return
-    body = df.to_string(index=False)
+
+    # Copy df so we don't modify original
+    df_email = df.copy()
+
+    # Make ticker clickable (Yahoo Finance)
+    df_email["Ticker"] = df_email["Ticker"].apply(
+        lambda x: f'<a href="https://finance.yahoo.com/quote/{x}" target="_blank">{x}</a>'
+    )
+
+    # Color RSI values
+    def style_rsi(val):
+        if val <= 30:
+            return f'<span style="color: #00c853; font-weight: bold;">{val}</span>'
+        elif val >= 70:
+            return f'<span style="color: #ff1744; font-weight: bold;">{val}</span>'
+        return val
+
+    df_email["RSI"] = df_email["RSI"].apply(style_rsi)
+
+    # Highlight EXTREME signals
+    def highlight_signal(val):
+        if "EXTREME" in val:
+            return f'<span style="color: #ff1744; font-weight: bold;">{val}</span>'
+        return val
+
+    df_email["Signal"] = df_email["Signal"].apply(highlight_signal)
+
+    # Convert to HTML table
+    html_table = df_email.to_html(index=False, escape=False)
+
+    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+
+    html = f"""
+    <html>
+    <head>
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            background-color: #f4f6f8;
+            padding: 20px;
+        }}
+        .container {{
+            background-color: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.05);
+        }}
+        h2 {{
+            margin-top: 0;
+        }}
+        table {{
+            border-collapse: collapse;
+            width: 100%;
+        }}
+        th {{
+            background-color: #111827;
+            color: white;
+            padding: 10px;
+            text-align: center;
+        }}
+        td {{
+            border-bottom: 1px solid #ddd;
+            padding: 8px;
+            text-align: center;
+        }}
+        tr:hover {{
+            background-color: #f1f1f1;
+        }}
+        .footer {{
+            margin-top: 20px;
+            font-size: 12px;
+            color: #777;
+        }}
+    </style>
+    </head>
+    <body>
+        <div class="container">
+            <h2>📊 RSI Extreme Signals</h2>
+            <p><strong>Scan Time:</strong> {timestamp}</p>
+            {html_table}
+            <div class="footer">
+                Generated automatically by your RSI Scanner system.
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+
     msg = EmailMessage()
-    msg.set_content(body)
-    msg['Subject'] = "RSI Extreme Signals"
-    msg['From'] = EMAIL_FROM
-    msg['To'] = EMAIL_TO
+    msg["Subject"] = "📊 RSI Extreme Signals Alert"
+    msg["From"] = EMAIL_FROM
+    msg["To"] = EMAIL_TO
+
+    msg.set_content("Your email client does not support HTML.")
+    msg.add_alternative(html, subtype="html")
 
     try:
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(EMAIL_FROM, EMAIL_PASSWORD)
             server.send_message(msg)
-        print("✅ Email sent successfully")
+        print("✅ Professional email sent successfully")
     except Exception as e:
         print("❌ Failed to send email:", e)
+
 
 # ==========================
 # RSI Scanner
