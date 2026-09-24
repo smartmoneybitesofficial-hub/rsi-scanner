@@ -18,9 +18,9 @@ INTERVAL = "1d"
 PERIOD = "6mo"
 RSI_PERIOD = 14
 
-RSI_OVERSOLD = 20
-RSI_EXTREME_OVERSOLD = 15
-RSI_OVERBOUGHT = 85
+RSI_OVERSOLD = 30
+RSI_EXTREME_OVERSOLD = 20
+RSI_OVERBOUGHT = 80
 RSI_EXTREME_OVERBOUGHT = 90
 
 # Optional: Gmail for alerts (use app password)
@@ -216,17 +216,16 @@ def run_rsi_scanner():
             price_change = round(((df["Close"].iloc[-1] - df["Close"].iloc[-2]) / df["Close"].iloc[-2]) * 100, 2)
             candle_trend = "🟢" if price_change>0 else "🔴" if price_change<0 else "➖"
 
-            # Signal: oversold signals require RSI to be rising;
-            # overbought signals require RSI to be falling.
+            # Signal
             signal = None
-            if current_rsi <= RSI_EXTREME_OVERSOLD and current_rsi > previous_rsi:
-                signal = "EXTREME OVERSOLD - RSI RISING"
-            elif current_rsi <= RSI_OVERSOLD and current_rsi > previous_rsi:
-                signal = "OVERSOLD - RSI RISING"
-            elif current_rsi >= RSI_EXTREME_OVERBOUGHT and current_rsi < previous_rsi:
-                signal = "EXTREME OVERBOUGHT - RSI FALLING"
-            elif current_rsi >= RSI_OVERBOUGHT and current_rsi < previous_rsi:
-                signal = "OVERBOUGHT - RSI FALLING"
+            if current_rsi <= RSI_EXTREME_OVERSOLD:
+                signal = "EXTREME OVERSOLD"
+            elif current_rsi <= RSI_OVERSOLD:
+                signal = "OVERSOLD"
+            elif current_rsi >= RSI_EXTREME_OVERBOUGHT:
+                signal = "EXTREME OVERBOUGHT"
+            elif current_rsi >= RSI_OVERBOUGHT:
+                signal = "OVERBOUGHT"
 
             if signal:
                 results.append([
