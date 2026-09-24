@@ -5,6 +5,10 @@ on:
     - cron: '0 8 * * 1-5'     # every weekday at ~9AM CET
   workflow_dispatch:
 
+concurrency:
+  group: rsi-scanner-main
+  cancel-in-progress: true
+
 permissions:
   contents: write   # REQUIRED for pushing
 
