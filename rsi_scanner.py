@@ -247,8 +247,9 @@ def run_rsi_scanner():
         ])
         print(tabulate(df_result, headers="keys", tablefmt="fancy_grid", showindex=False))
 
-        # Save to CSV (dashboard)
-        df_result.to_csv(CSV_FILE, index=False)
+        # Append this scan to the historical CSV (dashboard)
+        csv_has_content = os.path.isfile(CSV_FILE) and os.path.getsize(CSV_FILE) > 0
+        df_result.to_csv(CSV_FILE, mode="a", header=not csv_has_content, index=False)
         print(f"✅ Signals saved to {CSV_FILE}")
 
         # Optional email
