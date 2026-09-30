@@ -32,7 +32,7 @@ EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD", "")
 CSV_FILE = "signals.csv"
 FOLLOWUP_CSV_FILE = "signal_followup.csv"
 FOLLOWUP_COLUMNS = [
-    "Signal Date", "Ticker", "Signal RSI", "Entry Price",
+    "Signal Date", "Ticker", "Condition", "Signal RSI", "Entry Price",
     "Days After", "Date", "Close", "Return %"
 ]
 
@@ -67,60 +67,111 @@ def build_symbol_universe():
 # RSI Calculation
 # ==========================
 def compute_rsi_wilder(series, period=14):
-    delta = series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/period, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/period, adjust=False).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
+    delta = series.astype(float).diff()
+    gains = delta.clip(lower=0)
+    losses = -delta.clip(upper=0)
+    rsi = pd.Series(float("nan"), index=series.index, dtype=float)
+    if len(series) <= period:
+        return rsi
+
+    average_gain = float(gains.iloc[1:period + 1].mean())
+    average_loss = float(losses.iloc[1:period + 1].mean())
+    for position in range(period, len(series)):
+        if position > period:
+            average_gain = (average_gain * (period - 1) + float(gains.iloc[position])) / period
+            average_loss = (average_loss * (period - 1) + float(losses.iloc[position])) / period
+
+        if average_loss == 0:
+            rsi.iloc[position] = 50.0 if average_gain == 0 else 100.0
+        elif average_gain == 0:
+            rsi.iloc[position] = 0.0
+        else:
+            relative_strength = average_gain / average_loss
+            rsi.iloc[position] = 100 - (100 / (1 + relative_strength))
     return rsi
 
-def get_oversold_followup_rows(symbol, df):
-    rows = []
-    oversold = df["RSI"] <= RSI_OVERSOLD
+def make_followup_row(symbol, condition, signal_date, signal_rsi, entry_price,
+                      days_after, date, close):
+    return {
+        "Signal Date": signal_date,
+        "Ticker": symbol,
+        "Condition": condition,
+        "Signal RSI": signal_rsi,
+        "Entry Price": round(entry_price, 2),
+        "Days After": days_after,
+        "Date": date,
+        "Close": round(close, 2),
+        "Return %": round((close / entry_price - 1) * 100, 2),
+    }
 
-    for position in range(1, len(df)):
-        if not oversold.iloc[position] or oversold.iloc[position - 1]:
+def load_signal_events():
+    if not os.path.isfile(CSV_FILE) or os.path.getsize(CSV_FILE) == 0:
+        return pd.DataFrame(columns=["Signal Date", "Ticker", "Condition", "Signal RSI"])
+
+    signals = pd.read_csv(CSV_FILE)
+    required_columns = {"Time", "Ticker", "RSI", "Signal"}
+    missing_columns = required_columns.difference(signals.columns)
+    if missing_columns:
+        raise ValueError(
+            f"{CSV_FILE} is missing required columns: {', '.join(sorted(missing_columns))}"
+        )
+
+    events = signals[["Time", "Ticker", "RSI", "Signal"]].copy()
+    event_dates = pd.to_datetime(events["Time"], errors="coerce")
+    event_rsi = pd.to_numeric(events["RSI"], errors="coerce")
+    if event_dates.isna().any() or event_rsi.isna().any():
+        raise ValueError(f"{CSV_FILE} contains invalid signal dates or RSI values")
+
+    events["Signal Date"] = event_dates.dt.strftime("%Y-%m-%d")
+    events["Ticker"] = events["Ticker"].astype(str).str.strip()
+    events["Condition"] = events["Signal"].astype(str).str.strip()
+    events["Signal RSI"] = event_rsi
+    events = events[
+        events["Condition"].str.contains("OVERSOLD|OVERBOUGHT", case=False, regex=True)
+    ]
+    return events[["Signal Date", "Ticker", "Condition", "Signal RSI"]].drop_duplicates(
+        ["Signal Date", "Ticker", "Condition"], keep="last"
+    )
+
+def get_followup_rows_from_signals(symbol, df, signal_events):
+    rows = []
+    symbol_events = signal_events[signal_events["Ticker"] == symbol]
+    if symbol_events.empty:
+        return rows
+
+    history = df[["Close"]].copy()
+    history["Date"] = history.index.strftime("%Y-%m-%d")
+    history = history.drop_duplicates("Date", keep="last").reset_index(drop=True)
+    positions_by_date = {date: position for position, date in enumerate(history["Date"])}
+
+    for event in symbol_events.to_dict("records"):
+        signal_date = event["Signal Date"]
+        signal_position = positions_by_date.get(signal_date)
+        if signal_position is None:
+            print(f"No downloaded close for {symbol} signal date {signal_date}")
             continue
 
-        entry_price = float(df["Close"].iloc[position])
-        signal_date = df.index[position].strftime("%Y-%m-%d")
-        signal_rsi = round(float(df["RSI"].iloc[position]), 2)
-        days_to_record = min(10, len(df) - position - 1)
-
-        for days_after in range(days_to_record + 1):
-            followup_position = position + days_after
-            close = float(df["Close"].iloc[followup_position])
-            rows.append({
-                "Signal Date": signal_date,
-                "Ticker": symbol,
-                "Signal RSI": signal_rsi,
-                "Entry Price": round(entry_price, 2),
-                "Days After": days_after,
-                "Date": df.index[followup_position].strftime("%Y-%m-%d"),
-                "Close": round(close, 2),
-                "Return %": round((close / entry_price - 1) * 100, 2),
-            })
-
+        entry_price = float(history["Close"].iloc[signal_position])
+        for days_after in range(min(10, len(history) - signal_position - 1) + 1):
+            position = signal_position + days_after
+            close = float(history["Close"].iloc[position])
+            rows.append(make_followup_row(
+                symbol,
+                event["Condition"],
+                signal_date,
+                float(event["Signal RSI"]),
+                entry_price,
+                days_after,
+                history["Date"].iloc[position],
+                close,
+            ))
     return rows
 
 def save_followup_rows(new_rows):
-    rows_by_key = {}
-    if os.path.isfile(FOLLOWUP_CSV_FILE) and os.path.getsize(FOLLOWUP_CSV_FILE) > 0:
-        existing = pd.read_csv(FOLLOWUP_CSV_FILE)
-        for row in existing.to_dict("records"):
-            key = (str(row["Ticker"]), str(row["Signal Date"]), int(row["Days After"]))
-            rows_by_key[key] = row
-
-    for row in new_rows:
-        key = (row["Ticker"], row["Signal Date"], row["Days After"])
-        rows_by_key[key] = row
-
-    df_followup = pd.DataFrame(rows_by_key.values(), columns=FOLLOWUP_COLUMNS)
+    df_followup = pd.DataFrame(new_rows, columns=FOLLOWUP_COLUMNS)
     if not df_followup.empty:
         df_followup.sort_values(
-            ["Signal Date", "Ticker", "Days After"], inplace=True
+            ["Signal Date", "Ticker", "Condition", "Days After"], inplace=True
         )
     df_followup.to_csv(FOLLOWUP_CSV_FILE, index=False)
 
@@ -245,7 +296,9 @@ def send_email(df):
 def run_rsi_scanner():
     SYMBOLS = build_symbol_universe()
     results = []
-    followup_rows = []
+    existing_events = load_signal_events()
+    SYMBOLS = sorted(set(SYMBOLS + existing_events["Ticker"].tolist()))
+    price_history = {}
 
     for symbol in SYMBOLS:
         try:
@@ -255,7 +308,7 @@ def run_rsi_scanner():
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
             df["RSI"] = compute_rsi_wilder(df["Close"], RSI_PERIOD)
-            followup_rows.extend(get_oversold_followup_rows(symbol, df))
+            price_history[symbol] = df
             current_rsi = round(float(df["RSI"].iloc[-1]), 2)
             previous_rsi = float(df["RSI"].iloc[-2])
 
@@ -295,7 +348,8 @@ def run_rsi_scanner():
                     candle_trend,
                     signal
                 ])
-        except:
+        except Exception as error:
+            print(f"Failed to process {symbol}: {error}")
             continue
 
     if results:
@@ -314,6 +368,12 @@ def run_rsi_scanner():
     else:
         print("No extreme RSI signals right now.")
 
+    signal_events = load_signal_events()
+    followup_rows = []
+    for symbol, history in price_history.items():
+        followup_rows.extend(
+            get_followup_rows_from_signals(symbol, history, signal_events)
+        )
     save_followup_rows(followup_rows)
     print(f"✅ Signal follow-ups saved to {FOLLOWUP_CSV_FILE}")
 
