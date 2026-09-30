@@ -30,6 +30,11 @@ EMAIL_TO = os.environ.get("EMAIL_TO", "")
 EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD", "")
 
 CSV_FILE = "signals.csv"
+FOLLOWUP_CSV_FILE = "signal_followup.csv"
+FOLLOWUP_COLUMNS = [
+    "Signal Date", "Ticker", "Signal RSI", "Entry Price",
+    "Days After", "Date", "Close", "Return %"
+]
 
 # ==========================
 # SYMBOL UNIVERSE
@@ -70,6 +75,54 @@ def compute_rsi_wilder(series, period=14):
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
     return rsi
+
+def get_oversold_followup_rows(symbol, df):
+    rows = []
+    oversold = df["RSI"] <= RSI_OVERSOLD
+
+    for position in range(1, len(df)):
+        if not oversold.iloc[position] or oversold.iloc[position - 1]:
+            continue
+
+        entry_price = float(df["Close"].iloc[position])
+        signal_date = df.index[position].strftime("%Y-%m-%d")
+        signal_rsi = round(float(df["RSI"].iloc[position]), 2)
+        days_to_record = min(10, len(df) - position - 1)
+
+        for days_after in range(days_to_record + 1):
+            followup_position = position + days_after
+            close = float(df["Close"].iloc[followup_position])
+            rows.append({
+                "Signal Date": signal_date,
+                "Ticker": symbol,
+                "Signal RSI": signal_rsi,
+                "Entry Price": round(entry_price, 2),
+                "Days After": days_after,
+                "Date": df.index[followup_position].strftime("%Y-%m-%d"),
+                "Close": round(close, 2),
+                "Return %": round((close / entry_price - 1) * 100, 2),
+            })
+
+    return rows
+
+def save_followup_rows(new_rows):
+    rows_by_key = {}
+    if os.path.isfile(FOLLOWUP_CSV_FILE) and os.path.getsize(FOLLOWUP_CSV_FILE) > 0:
+        existing = pd.read_csv(FOLLOWUP_CSV_FILE)
+        for row in existing.to_dict("records"):
+            key = (str(row["Ticker"]), str(row["Signal Date"]), int(row["Days After"]))
+            rows_by_key[key] = row
+
+    for row in new_rows:
+        key = (row["Ticker"], row["Signal Date"], row["Days After"])
+        rows_by_key[key] = row
+
+    df_followup = pd.DataFrame(rows_by_key.values(), columns=FOLLOWUP_COLUMNS)
+    if not df_followup.empty:
+        df_followup.sort_values(
+            ["Signal Date", "Ticker", "Days After"], inplace=True
+        )
+    df_followup.to_csv(FOLLOWUP_CSV_FILE, index=False)
 
 # ==========================
 # Optional: Send Email
@@ -192,6 +245,7 @@ def send_email(df):
 def run_rsi_scanner():
     SYMBOLS = build_symbol_universe()
     results = []
+    followup_rows = []
 
     for symbol in SYMBOLS:
         try:
@@ -201,6 +255,7 @@ def run_rsi_scanner():
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
             df["RSI"] = compute_rsi_wilder(df["Close"], RSI_PERIOD)
+            followup_rows.extend(get_oversold_followup_rows(symbol, df))
             current_rsi = round(float(df["RSI"].iloc[-1]), 2)
             previous_rsi = float(df["RSI"].iloc[-2])
 
@@ -258,6 +313,9 @@ def run_rsi_scanner():
         send_email(df_result)
     else:
         print("No extreme RSI signals right now.")
+
+    save_followup_rows(followup_rows)
+    print(f"✅ Signal follow-ups saved to {FOLLOWUP_CSV_FILE}")
 
 if __name__ == "__main__":
     run_rsi_scanner()

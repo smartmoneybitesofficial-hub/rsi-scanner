@@ -53,12 +53,12 @@ jobs:
         run: |
           python rsi_scanner.py
 
-      - name: Commit and Push signals.csv
+      - name: Commit and Push scanner data
         shell: bash
         run: |
           set -e
 
-          git add signals.csv
+          git add signals.csv signal_followup.csv
 
           if git diff --cached --quiet; then
             echo "No changes to commit"
