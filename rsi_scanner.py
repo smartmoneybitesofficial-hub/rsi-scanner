@@ -213,6 +213,7 @@ def run_rsi_scanner():
                 rsi_dir = "Flat"
 
             # Price change
+            current_price = round(float(df["Close"].iloc[-1]), 2)
             price_change = round(((df["Close"].iloc[-1] - df["Close"].iloc[-2]) / df["Close"].iloc[-2]) * 100, 2)
             candle_trend = "🟢" if price_change>0 else "🔴" if price_change<0 else "➖"
 
@@ -231,6 +232,7 @@ def run_rsi_scanner():
                 results.append([
                     df.index[-1].strftime("%Y-%m-%d %H:%M"),
                     symbol,
+                    current_price,
                     INTERVAL,
                     current_rsi,
                     rsi_dir,
@@ -243,7 +245,7 @@ def run_rsi_scanner():
 
     if results:
         df_result = pd.DataFrame(results, columns=[
-            "Time", "Ticker", "TF", "RSI", "RSI Dir", "Price %", "Candle", "Signal"
+            "Time", "Ticker", "Price", "TF", "RSI", "RSI Dir", "Price %", "Candle", "Signal"
         ])
         print(tabulate(df_result, headers="keys", tablefmt="fancy_grid", showindex=False))
 
