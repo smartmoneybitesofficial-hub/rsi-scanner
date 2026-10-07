@@ -1,4 +1,4 @@
-Date,Ticker,Chart,Index,Market Cap ($B),Side,Zone Low,Zone High,Close,Touches,Volume Ratio,Last Touch,Pattern,Score
-2026-10-07,VRSN,"=HYPERLINK(""https://finance.yahoo.com/quote/VRSN/chart/"",""Open chart"")",S&P 500,26.47,Resistance,286.52,293.14,294.22,5,2.24,2026-10-07,Shooting Star,55.0
-2026-10-07,HUM,"=HYPERLINK(""https://finance.yahoo.com/quote/HUM/chart/"",""Open chart"")",S&P 500,48.54,Resistance,409.36,424.18,396.51,4,1.59,2026-10-07,Evening Star,45.0
-2026-10-07,VRSN,"=HYPERLINK(""https://finance.yahoo.com/quote/VRSN/chart/"",""Open chart"")",S&P 500,26.47,Resistance,297.04,306.32,294.22,3,2.24,2026-10-07,Shooting Star,35.0
+Date,Ticker,Chart URL,Index,Market Cap ($B),Side,Zone Low,Zone High,Close,Touches,Volume Ratio,Last Touch,Pattern,Score
+2026-10-07,VRSN,https://finance.yahoo.com/quote/VRSN/chart/,S&P 500,26.47,Resistance,286.52,293.14,294.22,5,2.24,2026-10-07,Shooting Star,55.0
+2026-10-07,HUM,https://finance.yahoo.com/quote/HUM/chart/,S&P 500,48.54,Resistance,409.36,424.18,396.51,4,1.59,2026-10-07,Evening Star,45.0
+2026-10-07,VRSN,https://finance.yahoo.com/quote/VRSN/chart/,S&P 500,26.47,Resistance,297.04,306.32,294.22,3,2.24,2026-10-07,Shooting Star,35.0
