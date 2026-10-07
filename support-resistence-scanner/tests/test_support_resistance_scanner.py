@@ -1,14 +1,21 @@
 import sys
+import tempfile
 import unittest
+import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from support_resistance_scanner import (  # noqa: E402
     detect_reversal_patterns,
+    build_html_report,
     find_pivots,
+    run_scan,
+    save_history,
     scan_symbol,
+    send_email_report,
 )
 
 
@@ -67,8 +74,8 @@ class ScannerTests(unittest.TestCase):
         self.assertTrue(any(hit["Side"] == "Support" for hit in hits))
         support_hit = next(hit for hit in hits if hit["Side"] == "Support")
         self.assertEqual(
-            support_hit["Chart"],
-            '=HYPERLINK("https://finance.yahoo.com/quote/TEST/chart/","Open chart")',
+            support_hit["Chart URL"],
+            "https://finance.yahoo.com/quote/TEST/chart/",
         )
         self.assertGreaterEqual(support_hit["Touches"], 3)
         self.assertEqual(support_hit["Last Touch"], frame.index[-1].strftime("%Y-%m-%d"))
@@ -122,6 +129,103 @@ class ScannerTests(unittest.TestCase):
             min_touches=3,
         )
         self.assertTrue(any(hit["Side"] == "Support" for hit in hits))
+
+    def test_html_report_has_clickable_yahoo_chart_link(self):
+        report = build_html_report(
+            pd.DataFrame(
+                [{
+                    "Ticker": "TEST",
+                    "Chart URL": "https://finance.yahoo.com/quote/TEST/chart/",
+                }]
+            )
+        )
+        self.assertIn(
+            '<a href="https://finance.yahoo.com/quote/TEST/chart/">Open chart</a>',
+            report,
+        )
+
+    def test_email_report_sends_html_using_configured_gmail_credentials(self):
+        results = pd.DataFrame([{"Date": "2026-10-07", "Ticker": "TEST"}])
+        html_report = "<html><body>Daily scan</body></html>"
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "EMAIL_FROM": "scanner@example.com",
+                    "EMAIL_TO": "recipient@example.com",
+                    "EMAIL_PASSWORD": "test-app-password",
+                },
+            ),
+            patch("support_resistance_scanner.smtplib.SMTP_SSL") as smtp,
+        ):
+            send_email_report(results, html_report, "2026-10-07")
+
+        server = smtp.return_value.__enter__.return_value
+        server.login.assert_called_once_with("scanner@example.com", "test-app-password")
+        message = server.send_message.call_args.args[0]
+        self.assertEqual(message["To"], "recipient@example.com")
+        self.assertIn("Daily scan", message.get_payload()[1].get_content())
+
+    def test_history_keeps_previous_dates_and_replaces_same_day_on_retry(self):
+        columns = ["Date", "Ticker", "Chart URL", "Score"]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.csv"
+            save_history(
+                pd.DataFrame(
+                    [
+                        ["2026-10-06", "OLD", "https://finance.yahoo.com/quote/OLD/chart/", 30],
+                        ["2026-10-07", "STALE", "https://finance.yahoo.com/quote/STALE/chart/", 20],
+                    ],
+                    columns=columns,
+                ),
+                path,
+                "2026-10-07",
+            )
+            current = pd.DataFrame(
+                [["2026-10-07", "NEW", "https://finance.yahoo.com/quote/NEW/chart/", 40]],
+                columns=columns,
+            )
+            save_history(current, path, "2026-10-07")
+            history = pd.read_csv(path)
+
+        self.assertEqual(history["Ticker"].tolist(), ["OLD", "NEW"])
+
+    def test_run_scan_writes_history_and_html_report(self):
+        lows = [100] * 40
+        lows[7] = 98
+        lows[21] = 98
+        rows = [(low + 1, low + 2, low, low + 1) for low in lows]
+        rows.extend([(100.5, 101, 99, 99.5), (99, 102, 97.5, 101.5)])
+        frame = frame_from_rows(rows)
+        frame.loc[frame.index[-1], "Volume"] = 200
+        frame.index = pd.date_range("2026-10-01", periods=len(frame))
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "history.csv"
+            html_output = Path(directory) / "report.html"
+            with (
+                patch("support_resistance_scanner.get_universe", return_value={"TEST": ["S&P 500"]}),
+                patch("support_resistance_scanner.get_market_caps", return_value={"TEST": 15_000_000_000}),
+                patch("support_resistance_scanner.download_history", return_value={"TEST": frame}),
+            ):
+                results = run_scan(
+                    indexes=["sp500"],
+                    order=1,
+                    atr_period=2,
+                    min_gap=2,
+                    output=output,
+                    html_output=html_output,
+                )
+
+            history = pd.read_csv(output)
+            report = html_output.read_text(encoding="utf-8")
+
+        self.assertFalse(results.empty)
+        self.assertTrue(any("TEST" == ticker for ticker in history["Ticker"]))
+        self.assertIn(
+            '<a href="https://finance.yahoo.com/quote/TEST/chart/">Open chart</a>',
+            report,
+        )
 
 
 if __name__ == "__main__":

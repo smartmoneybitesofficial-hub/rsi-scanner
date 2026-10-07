@@ -2,7 +2,8 @@ name: Support and Resistance Scanner
 
 on:
   schedule:
-    - cron: "30 22 * * 1-5"
+    - cron: "0 3 * * *"
+    - cron: "0 4 * * *"
   workflow_dispatch:
     inputs:
       indexes:
@@ -12,7 +13,7 @@ on:
         type: string
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: support-resistance-scanner
@@ -26,7 +27,19 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Run only at 5 AM Central European local time
+        id: schedule
+        shell: bash
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" != "schedule" ]] || [[ "$(TZ=Europe/Berlin date +%H)" == "05" ]]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "This UTC schedule does not correspond to 5 AM Central European local time today."
+          fi
+
       - name: Set up Python
+        if: steps.schedule.outputs.should_run == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -34,23 +47,71 @@ jobs:
           cache-dependency-path: support-resistence-scanner/requirements.txt
 
       - name: Install dependencies
+        if: steps.schedule.outputs.should_run == 'true'
         run: python -m pip install -r support-resistence-scanner/requirements.txt
 
       - name: Run scanner tests
+        if: steps.schedule.outputs.should_run == 'true'
         run: python -m unittest discover -s support-resistence-scanner/tests -v
 
-      - name: Run support/resistance scan
+      - name: Run scan and email HTML report (retry up to 3 times)
+        if: steps.schedule.outputs.should_run == 'true'
         env:
           SCAN_INDEXES: ${{ inputs.indexes || 'sp500 nasdaq100' }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+        shell: bash
         run: |
-          python support-resistence-scanner/support_resistance_scanner.py \
-            --indexes $SCAN_INDEXES \
-            --output support-resistence-scanner/support_resistance_signals.csv
+          read -r -a indexes <<< "$SCAN_INDEXES"
+          for attempt in 1 2 3; do
+            if python support-resistence-scanner/support_resistance_scanner.py \
+              --indexes "${indexes[@]}" \
+              --output support-resistence-scanner/support_resistance_signals.csv \
+              --html-output support-resistence-scanner/support_resistance_report.html \
+              --send-email; then
+              exit 0
+            fi
+            if [[ "$attempt" -lt 3 ]]; then
+              echo "Scan or email failed (attempt $attempt/3); retrying in 60 seconds."
+              sleep 60
+            fi
+          done
+          echo "Scan/email failed after 3 attempts."
+          exit 1
+
+      - name: Commit daily scan history
+        if: steps.schedule.outputs.should_run == 'true'
+        shell: bash
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add support-resistence-scanner/support_resistance_signals.csv
+          if git diff --cached --quiet; then
+            echo "No history changes to commit."
+            exit 0
+          fi
+          git commit -m "Update support and resistance scan history [skip ci]"
+          for attempt in 1 2 3; do
+            if git pull --rebase origin main && git push origin HEAD:main; then
+              exit 0
+            fi
+            if [[ "$attempt" -lt 3 ]]; then
+              echo "History push failed (attempt $attempt/3); retrying in 30 seconds."
+              sleep 30
+            fi
+          done
+          echo "Could not push scan history after 3 attempts."
+          exit 1
 
       - name: Upload scan results
+        if: always() && steps.schedule.outputs.should_run == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: support-resistance-signals-${{ github.run_id }}
-          path: support-resistence-scanner/support_resistance_signals.csv
+          path: |
+            support-resistence-scanner/support_resistance_signals.csv
+            support-resistence-scanner/support_resistance_report.html
           if-no-files-found: error
           retention-days: 30

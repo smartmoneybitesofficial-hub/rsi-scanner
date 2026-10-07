@@ -3,15 +3,22 @@
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import math
+import os
+import smtplib
 import sys
+from datetime import datetime, timezone
 from dataclasses import dataclass
+from email.message import EmailMessage
 from io import StringIO
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Iterable
 from urllib.parse import quote
 from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import yfinance as yf
@@ -26,6 +33,7 @@ NASDAQ_SCREENER_URL = (
 MARKET_CAP_EXCHANGES = ("nasdaq", "nyse", "amex")
 OHLC_COLUMNS = ("Open", "High", "Low", "Close")
 DEFAULT_OUTPUT = Path(__file__).resolve().parent / "support_resistance_signals.csv"
+DEFAULT_HTML_OUTPUT = Path(__file__).resolve().parent / "support_resistance_report.html"
 MIN_MARKET_CAP = 2_000_000_000
 VOLUME_LOOKBACK = 20
 MIN_VOLUME_RATIO = 1.5
@@ -452,10 +460,7 @@ def scan_symbol(
             {
                 "Date": pd.Timestamp(data.index[-1]).strftime("%Y-%m-%d"),
                 "Ticker": symbol,
-                "Chart": (
-                    f'=HYPERLINK("https://finance.yahoo.com/quote/'
-                    f'{quote(symbol, safe=".-")}/chart/","Open chart")'
-                ),
+                "Chart URL": f"https://finance.yahoo.com/quote/{quote(symbol, safe='.-')}/chart/",
                 "Index": ", ".join(indexes),
                 "Market Cap ($B)": round(market_cap / 1_000_000_000, 2),
                 "Side": zone.side.title(),
@@ -470,6 +475,140 @@ def scan_symbol(
             }
         )
     return results
+
+
+def build_html_report(results: pd.DataFrame, report_date: str | None = None) -> str:
+    """Render the current scan as a styled email-friendly HTML table."""
+    columns = list(results.columns)
+    header = "".join(f"<th>{html.escape(str(column))}</th>" for column in columns)
+    rows: list[str] = []
+    for record in results.to_dict("records"):
+        cells: list[str] = []
+        for column in columns:
+            value = record[column]
+            if pd.isna(value):
+                display = ""
+            elif isinstance(value, float):
+                display = f"{value:,.2f}"
+            else:
+                display = str(value)
+            if column == "Chart URL" and display.startswith("https://finance.yahoo.com/"):
+                escaped_url = html.escape(display, quote=True)
+                cell = f'<a href="{escaped_url}">Open chart</a>'
+            else:
+                cell = html.escape(display)
+            cells.append(f"<td>{cell}</td>")
+        rows.append("<tr>" + "".join(cells) + "</tr>")
+
+    count = len(results)
+    content = (
+        f'<table><thead><tr>{header}</tr></thead><tbody>{"".join(rows)}</tbody></table>'
+        if rows
+        else '<p class="empty">No setups passed the scanner filters today.</p>'
+    )
+    report_date = html.escape(
+        report_date
+        or (
+            str(results["Date"].max())
+            if count and "Date" in results
+            else datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        )
+    )
+    return f"""<!doctype html>
+<html><head><meta charset="utf-8"><style>
+body {{ margin:0; padding:24px; background:#f3f6fa; color:#172033; font:14px Arial,sans-serif; }}
+.card {{ max-width:1400px; margin:auto; padding:24px; background:#fff; border-radius:12px; }}
+h1 {{ margin:0 0 8px; font-size:24px; }} .meta {{ color:#5d6879; margin:0 0 20px; }}
+.table-wrap {{ overflow-x:auto; }} table {{ width:100%; border-collapse:collapse; white-space:nowrap; }}
+th {{ background:#172033; color:#fff; text-align:left; padding:10px 12px; }}
+td {{ border-bottom:1px solid #e6eaf0; padding:9px 12px; }}
+tr:nth-child(even) {{ background:#f8fafc; }} a {{ color:#0969da; font-weight:600; }}
+.empty {{ padding:18px; background:#f8fafc; border-radius:8px; }}
+.footnote {{ color:#687386; font-size:12px; margin-top:20px; }}
+</style></head><body><main class="card">
+<h1>Support &amp; Resistance Reversal Scan</h1>
+<p class="meta">Market date: {report_date} &nbsp;|&nbsp; {count} qualifying setup(s)</p>
+<div class="table-wrap">{content}</div>
+<p class="footnote">Daily candidates filtered by market capitalization and pattern-day volume.
+Review the linked charts before making any decisions.</p>
+</main></body></html>"""
+
+
+def send_email_report(
+    results: pd.DataFrame,
+    html_report: str,
+    report_date: str,
+) -> None:
+    email_from = os.environ.get("EMAIL_FROM", "").strip()
+    email_to = os.environ.get("EMAIL_TO", "").strip()
+    email_password = os.environ.get("EMAIL_PASSWORD", "")
+    missing = [
+        name for name, value in (
+            ("EMAIL_FROM", email_from),
+            ("EMAIL_TO", email_to),
+            ("EMAIL_PASSWORD", email_password),
+        ) if not value
+    ]
+    if missing:
+        raise RuntimeError(f"Missing required email configuration: {', '.join(missing)}")
+
+    message = EmailMessage()
+    message["Subject"] = f"Support & Resistance Scanner — {report_date}: {len(results)} setup(s)"
+    message["From"] = email_from
+    message["To"] = email_to
+    message.set_content(
+        f"Support and resistance scan for {report_date}: {len(results)} qualifying setup(s). "
+        "Open this message in an HTML-capable email client to view the report and chart links."
+    )
+    message.add_alternative(html_report, subtype="html")
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as server:
+        server.login(email_from, email_password)
+        server.send_message(message)
+    print(f"HTML report emailed to {email_to}.")
+
+
+def save_history(
+    results: pd.DataFrame,
+    output: Path,
+    scan_date: str,
+) -> None:
+    """Replace the current scan date and retain all prior dates in the CSV."""
+    history = results.copy()
+    if output.exists() and output.stat().st_size:
+        previous = pd.read_csv(output)
+        if "Chart URL" not in previous.columns and "Ticker" in previous.columns:
+            previous["Chart URL"] = previous["Ticker"].map(
+                lambda ticker: (
+                    f"https://finance.yahoo.com/quote/{quote(str(ticker), safe='.-')}/chart/"
+                )
+            )
+        for column in history.columns:
+            if column not in previous.columns:
+                previous[column] = pd.NA
+        previous = previous[list(history.columns)]
+        if "Date" in previous.columns:
+            previous = previous[previous["Date"].astype(str) != scan_date]
+        history = pd.concat([previous, history], ignore_index=True)
+
+    if "Date" in history.columns:
+        history.sort_values(
+            ["Date", "Score", "Ticker"],
+            ascending=[True, False, True],
+            inplace=True,
+            ignore_index=True,
+        )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        newline="",
+        suffix=".tmp",
+        dir=output.parent,
+        delete=False,
+    ) as temporary:
+        temp_path = Path(temporary.name)
+        history.to_csv(temporary, index=False)
+    temp_path.replace(output)
 
 
 def _extract_ticker_frame(download: pd.DataFrame, symbol: str) -> pd.DataFrame | None:
@@ -544,6 +683,8 @@ def run_scan(
     min_market_cap: float = MIN_MARKET_CAP,
     volume_lookback: int = VOLUME_LOOKBACK,
     min_volume_ratio: float = MIN_VOLUME_RATIO,
+    html_output: Path = DEFAULT_HTML_OUTPUT,
+    email_report: bool = False,
     output: Path = DEFAULT_OUTPUT,
 ) -> pd.DataFrame:
     members = get_universe(indexes)
@@ -582,7 +723,7 @@ def run_scan(
             print(f"Warning: skipping {symbol}: {error}", file=sys.stderr)
 
     columns = [
-        "Date", "Ticker", "Chart", "Index", "Market Cap ($B)", "Side",
+        "Date", "Ticker", "Chart URL", "Index", "Market Cap ($B)", "Side",
         "Zone Low", "Zone High", "Close", "Touches", "Volume Ratio",
         "Last Touch", "Pattern", "Score",
     ]
@@ -594,13 +735,23 @@ def run_scan(
             inplace=True,
             ignore_index=True,
         )
-    output.parent.mkdir(parents=True, exist_ok=True)
-    result.to_csv(output, index=False)
+    scan_date = (
+        max(pd.Timestamp(history.index[-1]) for history in histories.values()).strftime("%Y-%m-%d")
+        if histories
+        else datetime.now(ZoneInfo("Europe/Berlin")).strftime("%Y-%m-%d")
+    )
+    save_history(result, output, scan_date)
+    html_report = build_html_report(result, scan_date)
+    html_output.parent.mkdir(parents=True, exist_ok=True)
+    html_output.write_text(html_report, encoding="utf-8")
     if result.empty:
         print("No support/resistance reversal setups found.")
     else:
         print(result.to_string(index=False))
-    print(f"Saved {len(result)} setup(s) to {output}")
+    print(f"Saved {len(result)} setup(s) for {scan_date} to history file {output}")
+    print(f"Saved HTML report to {html_output}")
+    if email_report:
+        send_email_report(result, html_report, scan_date)
     return result
 
 
@@ -633,6 +784,12 @@ def parse_args() -> argparse.Namespace:
         help="Minimum pattern-day volume divided by prior average volume",
     )
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--html-output", type=Path, default=DEFAULT_HTML_OUTPUT)
+    parser.add_argument(
+        "--send-email",
+        action="store_true",
+        help="Send the HTML report using EMAIL_FROM, EMAIL_TO, and EMAIL_PASSWORD",
+    )
     return parser.parse_args()
 
 
@@ -649,6 +806,8 @@ def main() -> None:
         min_market_cap=args.min_market_cap * 1_000_000_000,
         volume_lookback=args.volume_lookback,
         min_volume_ratio=args.min_volume_ratio,
+        html_output=args.html_output,
+        email_report=args.send_email,
         output=args.output,
     )
 

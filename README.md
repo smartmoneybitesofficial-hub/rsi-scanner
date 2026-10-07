@@ -41,6 +41,11 @@ stocks with market capitalization strictly above $2 billion and latest
 pattern-day volume at least 1.5 times the preceding 20-session average
 (excluding the pattern day). Market caps are loaded in bulk from Nasdaq's
 exchange screener, with Yahoo Finance as a fallback for unmatched listings.
+The scheduled workflow runs daily at 5:00 AM Central European local time,
+retries scan/email failures up to three times, sends a formatted HTML report to
+the configured Gmail address, and preserves each scan date in the history CSV.
+Set the `EMAIL_FROM`, `EMAIL_TO`, and `EMAIL_PASSWORD` repository Actions
+secrets; `EMAIL_PASSWORD` must be a Gmail app password.
 
 Install its dependencies and run both index universes with:
 
@@ -54,11 +59,12 @@ are a 5-bar swing window, ATR(14), a 0.6 ATR clustering tolerance, an 8-bar
 minimum gap between touches, and 3 minimum touches. Adjust these with
 `--order`, `--atr-period`, `--tolerance-atr`, `--min-gap`, and `--min-touches`.
 The CSV is written to `support-resistence-scanner/support_resistance_signals.csv`
-by default and includes a clickable **Open chart** hyperlink for each ticker,
-plus market cap in billions and the pattern-day volume ratio. Tune the quality
-filters with `--min-market-cap` (billions; default 2),
+by default and keeps prior scan dates for history. It includes the Yahoo
+Finance chart URL, market cap in billions, and the pattern-day volume ratio;
+the generated HTML report renders each chart URL as a clickable **Open chart**
+link. Tune the quality filters with `--min-market-cap` (billions; default 2),
 `--volume-lookback`, and `--min-volume-ratio`.
 
-The scheduled **Support and Resistance Scanner** GitHub Actions workflow runs
-on weekdays and uploads its CSV as a downloadable artifact retained for 30
-days. It can also be started manually from the Actions tab.
+The scheduled **Support and Resistance Scanner** GitHub Actions workflow also
+uploads the CSV history and current HTML report as downloadable artifacts
+retained for 30 days. It can also be started manually from the Actions tab.
