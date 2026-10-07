@@ -67,8 +67,8 @@ class ScannerTests(unittest.TestCase):
         self.assertTrue(any(hit["Side"] == "Support" for hit in hits))
         support_hit = next(hit for hit in hits if hit["Side"] == "Support")
         self.assertEqual(
-            support_hit["Chart URL"],
-            "https://finance.yahoo.com/quote/TEST/chart/",
+            support_hit["Chart"],
+            '=HYPERLINK("https://finance.yahoo.com/quote/TEST/chart/","Open chart")',
         )
         self.assertGreaterEqual(support_hit["Touches"], 3)
         self.assertEqual(support_hit["Last Touch"], frame.index[-1].strftime("%Y-%m-%d"))
@@ -93,13 +93,35 @@ class ScannerTests(unittest.TestCase):
             "min_touches": 3,
         }
         self.assertEqual(
-            scan_symbol("TEST", frame, ["S&P 500"], market_cap=10_000_000_000, **options),
+            scan_symbol("TEST", frame, ["S&P 500"], market_cap=2_000_000_000, **options),
             [],
         )
         self.assertEqual(
-            scan_symbol("TEST", frame, ["S&P 500"], market_cap=15_000_000_000, **options),
+            scan_symbol("TEST", frame, ["S&P 500"], market_cap=2_100_000_000, **options),
             [],
         )
+
+    def test_market_cap_above_two_billion_passes_market_cap_filter(self):
+        lows = [100] * 40
+        lows[7] = 98
+        lows[21] = 98
+        rows = [(low + 1, low + 2, low, low + 1) for low in lows]
+        rows.extend([(100.5, 101, 99, 99.5), (99, 102, 97.5, 101.5)])
+        frame = frame_from_rows(rows)
+        frame.loc[frame.index[-1], "Volume"] = 200
+        frame.index = pd.date_range("2025-01-01", periods=len(frame))
+        hits = scan_symbol(
+            "TEST",
+            frame,
+            ["S&P 500"],
+            market_cap=2_100_000_000,
+            order=1,
+            atr_period=2,
+            tolerance_atr=0.6,
+            min_gap=2,
+            min_touches=3,
+        )
+        self.assertTrue(any(hit["Side"] == "Support" for hit in hits))
 
 
 if __name__ == "__main__":

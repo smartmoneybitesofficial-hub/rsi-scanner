@@ -26,7 +26,7 @@ NASDAQ_SCREENER_URL = (
 MARKET_CAP_EXCHANGES = ("nasdaq", "nyse", "amex")
 OHLC_COLUMNS = ("Open", "High", "Low", "Close")
 DEFAULT_OUTPUT = Path(__file__).resolve().parent / "support_resistance_signals.csv"
-MIN_MARKET_CAP = 10_000_000_000
+MIN_MARKET_CAP = 2_000_000_000
 VOLUME_LOOKBACK = 20
 MIN_VOLUME_RATIO = 1.5
 
@@ -452,7 +452,10 @@ def scan_symbol(
             {
                 "Date": pd.Timestamp(data.index[-1]).strftime("%Y-%m-%d"),
                 "Ticker": symbol,
-                "Chart URL": f"https://finance.yahoo.com/quote/{quote(symbol, safe='.-')}/chart/",
+                "Chart": (
+                    f'=HYPERLINK("https://finance.yahoo.com/quote/'
+                    f'{quote(symbol, safe=".-")}/chart/","Open chart")'
+                ),
                 "Index": ", ".join(indexes),
                 "Market Cap ($B)": round(market_cap / 1_000_000_000, 2),
                 "Side": zone.side.title(),
@@ -579,7 +582,7 @@ def run_scan(
             print(f"Warning: skipping {symbol}: {error}", file=sys.stderr)
 
     columns = [
-        "Date", "Ticker", "Chart URL", "Index", "Market Cap ($B)", "Side",
+        "Date", "Ticker", "Chart", "Index", "Market Cap ($B)", "Side",
         "Zone Low", "Zone High", "Close", "Touches", "Volume Ratio",
         "Last Touch", "Pattern", "Score",
     ]
