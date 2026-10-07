@@ -36,7 +36,11 @@ for the S&P 500 and Nasdaq-100. It clusters confirmed swing lows and highs
 using an ATR-based tolerance, requires at least three distinct touches, and
 reports setups when the latest candle tests a zone and forms a matching
 hammer, shooting star, engulfing, morning/evening star, or doji pattern.
-The current reversal candle counts as the latest touch.
+The current reversal candle counts as the latest touch. Results are filtered to
+stocks with market capitalization strictly above $10 billion and latest
+pattern-day volume at least 1.5 times the preceding 20-session average
+(excluding the pattern day). Market caps are loaded in bulk from Nasdaq's
+exchange screener, with Yahoo Finance as a fallback for unmatched listings.
 
 Install its dependencies and run both index universes with:
 
@@ -50,7 +54,10 @@ are a 5-bar swing window, ATR(14), a 0.6 ATR clustering tolerance, an 8-bar
 minimum gap between touches, and 3 minimum touches. Adjust these with
 `--order`, `--atr-period`, `--tolerance-atr`, `--min-gap`, and `--min-touches`.
 The CSV is written to `support-resistence-scanner/support_resistance_signals.csv`
-by default.
+by default and includes a **Chart URL** column linking each ticker directly to
+its Yahoo Finance chart, plus market cap in billions and the pattern-day volume
+ratio. Tune the quality filters with `--min-market-cap` (billions),
+`--volume-lookback`, and `--min-volume-ratio`.
 
 The scheduled **Support and Resistance Scanner** GitHub Actions workflow runs
 on weekdays and uploads its CSV as a downloadable artifact retained for 30

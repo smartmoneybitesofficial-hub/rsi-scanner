@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
 from typing import Iterable
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 import pandas as pd
@@ -18,8 +19,16 @@ import yfinance as yf
 
 SP500_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 NASDAQ100_API_URL = "https://api.nasdaq.com/api/quote/list-type/nasdaq100"
+NASDAQ_SCREENER_URL = (
+    "https://api.nasdaq.com/api/screener/stocks"
+    "?tableonly=true&limit=5000&offset=0&exchange={exchange}"
+)
+MARKET_CAP_EXCHANGES = ("nasdaq", "nyse", "amex")
 OHLC_COLUMNS = ("Open", "High", "Low", "Close")
 DEFAULT_OUTPUT = Path(__file__).resolve().parent / "support_resistance_signals.csv"
+MIN_MARKET_CAP = 10_000_000_000
+VOLUME_LOOKBACK = 20
+MIN_VOLUME_RATIO = 1.5
 
 
 @dataclass(frozen=True)
@@ -100,6 +109,56 @@ def get_universe(indexes: Iterable[str]) -> dict[str, list[str]]:
     if not members:
         raise RuntimeError("The selected index constituents could not be loaded.")
     return members
+
+
+def _normalize_symbol(symbol: object) -> str:
+    return str(symbol).strip().upper().replace("/", "-").replace(".", "-")
+
+
+def _parse_market_cap(value: object) -> float | None:
+    text = str(value).strip().replace("$", "").replace(",", "")
+    if not text or text in {"--", "N/A", "None"}:
+        return None
+    try:
+        market_cap = float(text)
+    except ValueError:
+        return None
+    return market_cap if math.isfinite(market_cap) and market_cap > 0 else None
+
+
+def get_market_caps(symbols: Iterable[str]) -> dict[str, float]:
+    """Load market caps in bulk from Nasdaq listings, with Yahoo fallback for gaps."""
+    requested = {_normalize_symbol(symbol) for symbol in symbols}
+    market_caps: dict[str, float] = {}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; SupportResistanceScanner/1.0)",
+        "Accept": "application/json",
+    }
+    for exchange in MARKET_CAP_EXCHANGES:
+        request = Request(NASDAQ_SCREENER_URL.format(exchange=exchange), headers=headers)
+        with urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        rows = payload["data"]["table"]["rows"]
+        for row in rows:
+            symbol = _normalize_symbol(row.get("symbol", ""))
+            if symbol not in requested:
+                continue
+            market_cap = _parse_market_cap(row.get("marketCap"))
+            if market_cap is not None:
+                market_caps[symbol] = market_cap
+
+    unresolved = requested.difference(market_caps)
+    for symbol in sorted(unresolved):
+        try:
+            market_cap = yf.Ticker(symbol).get_info().get("marketCap")
+            parsed = _parse_market_cap(market_cap)
+            if parsed is not None:
+                market_caps[symbol] = parsed
+            else:
+                print(f"Warning: no market-cap data for {symbol}; excluding it.", file=sys.stderr)
+        except Exception as error:
+            print(f"Warning: market-cap lookup failed for {symbol}; excluding it: {error}", file=sys.stderr)
+    return market_caps
 
 
 def compute_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
@@ -331,23 +390,44 @@ def scan_symbol(
     df: pd.DataFrame,
     indexes: list[str],
     *,
+    market_cap: float | None = None,
+    min_market_cap: float = MIN_MARKET_CAP,
+    volume_lookback: int = VOLUME_LOOKBACK,
+    min_volume_ratio: float = MIN_VOLUME_RATIO,
     order: int = 5,
     atr_period: int = 14,
     tolerance_atr: float = 0.6,
     min_gap: int = 8,
     min_touches: int = 3,
 ) -> list[dict[str, object]]:
-    """Return reversal signals only when the latest candle tests a matching zone."""
+    """Return volume-confirmed reversal signals at tested zones for eligible stocks."""
     required = set(OHLC_COLUMNS)
     if not required.issubset(df.columns):
         missing = ", ".join(sorted(required.difference(df.columns)))
         raise ValueError(f"{symbol} is missing OHLC columns: {missing}")
+    if "Volume" not in df.columns:
+        raise ValueError(f"{symbol} is missing Volume required by the volume filter")
+    if market_cap is None or market_cap <= min_market_cap:
+        return []
+    if volume_lookback < 1 or min_volume_ratio <= 0:
+        raise ValueError("volume_lookback and min_volume_ratio must be positive")
     data = df.dropna(subset=list(OHLC_COLUMNS)).sort_index()
-    if len(data) < max(atr_period + order * 2 + 1, 30):
+    if len(data) < max(atr_period + order * 2 + 1, volume_lookback + 1, 30):
         return []
 
     patterns = detect_reversal_patterns(data)
     latest = data.iloc[-1]
+    volume = pd.to_numeric(data["Volume"], errors="coerce")
+    reference_volume = volume.iloc[-volume_lookback - 1:-1].mean()
+    pattern_volume = float(volume.iloc[-1])
+    if (
+        not math.isfinite(float(reference_volume))
+        or reference_volume <= 0
+        or not math.isfinite(pattern_volume)
+        or pattern_volume < min_volume_ratio * float(reference_volume)
+    ):
+        return []
+    volume_ratio = pattern_volume / float(reference_volume)
     latest_atr = float(compute_atr(data, atr_period).iloc[-1])
     if not math.isfinite(latest_atr) or latest_atr <= 0:
         return []
@@ -372,12 +452,15 @@ def scan_symbol(
             {
                 "Date": pd.Timestamp(data.index[-1]).strftime("%Y-%m-%d"),
                 "Ticker": symbol,
+                "Chart URL": f"https://finance.yahoo.com/quote/{quote(symbol, safe='.-')}/chart/",
                 "Index": ", ".join(indexes),
+                "Market Cap ($B)": round(market_cap / 1_000_000_000, 2),
                 "Side": zone.side.title(),
                 "Zone Low": round(zone.low, 2),
                 "Zone High": round(zone.high, 2),
                 "Close": round(float(latest["Close"]), 2),
                 "Touches": total_touches,
+                "Volume Ratio": round(volume_ratio, 2),
                 "Last Touch": pd.Timestamp(data.index[-1]).strftime("%Y-%m-%d"),
                 "Pattern": ", ".join(matching_patterns),
                 "Score": round(total_touches * 10 + 5.0, 2),
@@ -455,11 +538,24 @@ def run_scan(
     tolerance_atr: float = 0.6,
     min_gap: int = 8,
     min_touches: int = 3,
+    min_market_cap: float = MIN_MARKET_CAP,
+    volume_lookback: int = VOLUME_LOOKBACK,
+    min_volume_ratio: float = MIN_VOLUME_RATIO,
     output: Path = DEFAULT_OUTPUT,
 ) -> pd.DataFrame:
     members = get_universe(indexes)
-    print(f"Downloading daily prices for {len(members)} unique index members.")
-    histories = download_history(members, period=period)
+    market_caps = get_market_caps(members)
+    qualifying = {
+        symbol: index_members
+        for symbol, index_members in members.items()
+        if market_caps.get(symbol, 0) > min_market_cap
+    }
+    print(
+        f"Market-cap filter (>${min_market_cap / 1_000_000_000:.0f}B): "
+        f"{len(qualifying)} of {len(members)} stocks qualify."
+    )
+    print(f"Downloading daily prices for {len(qualifying)} qualifying index members.")
+    histories = download_history(qualifying, period=period)
     results: list[dict[str, object]] = []
     for symbol, history in histories.items():
         try:
@@ -467,7 +563,11 @@ def run_scan(
                 scan_symbol(
                     symbol,
                     history,
-                    members[symbol],
+                    qualifying[symbol],
+                    market_cap=market_caps[symbol],
+                    min_market_cap=min_market_cap,
+                    volume_lookback=volume_lookback,
+                    min_volume_ratio=min_volume_ratio,
                     order=order,
                     atr_period=atr_period,
                     tolerance_atr=tolerance_atr,
@@ -479,8 +579,9 @@ def run_scan(
             print(f"Warning: skipping {symbol}: {error}", file=sys.stderr)
 
     columns = [
-        "Date", "Ticker", "Index", "Side", "Zone Low", "Zone High", "Close",
-        "Touches", "Last Touch", "Pattern", "Score",
+        "Date", "Ticker", "Chart URL", "Index", "Market Cap ($B)", "Side",
+        "Zone Low", "Zone High", "Close", "Touches", "Volume Ratio",
+        "Last Touch", "Pattern", "Score",
     ]
     result = pd.DataFrame(results, columns=columns)
     if not result.empty:
@@ -515,6 +616,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tolerance-atr", type=float, default=0.6)
     parser.add_argument("--min-gap", type=int, default=8)
     parser.add_argument("--min-touches", type=int, default=3)
+    parser.add_argument(
+        "--min-market-cap",
+        type=float,
+        default=MIN_MARKET_CAP / 1_000_000_000,
+        help="Minimum market capitalization in billions of dollars (strictly greater)",
+    )
+    parser.add_argument("--volume-lookback", type=int, default=VOLUME_LOOKBACK)
+    parser.add_argument(
+        "--min-volume-ratio",
+        type=float,
+        default=MIN_VOLUME_RATIO,
+        help="Minimum pattern-day volume divided by prior average volume",
+    )
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     return parser.parse_args()
 
@@ -529,6 +643,9 @@ def main() -> None:
         tolerance_atr=args.tolerance_atr,
         min_gap=args.min_gap,
         min_touches=args.min_touches,
+        min_market_cap=args.min_market_cap * 1_000_000_000,
+        volume_lookback=args.volume_lookback,
+        min_volume_ratio=args.min_volume_ratio,
         output=args.output,
     )
 
